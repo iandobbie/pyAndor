@@ -51,6 +51,8 @@ except:
 else:
     CAMERAS = {camera[0]: dict(zip(_camera_keys, camera)) for camera in _cameras}
 
+EPSILON = sys.float_info.epsilon
+
 
 # A list of the camera models this module supports (or should support.)
 SUPPORTED_CAMERAS = ['ixon', 'ixon_plus', 'ixon_ultra']
@@ -328,7 +330,7 @@ class Camera(object):
         # Enable temperature control.
         if settings.get('isWaterCooled'):
             # Use fan at low speed.
-            self.SetFanMode(1)
+            self.SetFanMode(2)
         else:
             # Use fan at full speed.
             self.SetFanMode(0)
@@ -377,13 +379,15 @@ class Camera(object):
         (exposure, accumulate, kinetics) = self.get_acquisition_timings()
         if self.acquisition_mode in [1, 5]:
             # single exposure or run untul abort
-            return exposure
+            t = exposure
         elif self.acquisition_mode == 2:
             # accumulate mode
-            return accumulate
+            t = accumulate
         elif self.acquisition_mode in [3, 4]:
             # kinetics or fast kinetics
-            return kinetics
+            t = kinetics
+        # Assume worst-case floating point underestimation
+        return t + t * EPSILON
 
 
     @with_camera
@@ -392,8 +396,13 @@ class Camera(object):
         if self.acquisition_mode in [1, 5, 7]:
             # single exposure or run until abort
             t = self.get_read_out_time()
+            # Assume worst-case floating point underestimation.
+            t += EPSILON * t
             if not self.settings.get('fastTrigger'):
-                t += self.get_keep_clean_time()
+                t_kc = self.get_keep_clean_time()
+                # Assume worst-case floating point underestimation.
+                t_kc += EPSILON * t_kc
+                t += t_kc
             return t
         elif self.acquisition_mode == 2:
             # accumulate mode
@@ -512,6 +521,10 @@ class Camera(object):
         # Clear the flag so that our client will poll until it is True.
         self.enabled = False
 
+        
+
+
+
         try:
             # Stop whatever the camera was doing.
             self.abort()
@@ -523,6 +536,8 @@ class Camera(object):
 
         # Update this camera's settings dict.
         self.settings.update(settings)
+
+
 
         # Apply changed settings to the hardware.
         for key in update_keys:
@@ -538,7 +553,7 @@ class Camera(object):
                 self.set_target_temperature(val)
             elif key == 'frameTransfer':
                 self.SetFrameTransferMode(val)
-            elif key == 'baseTransform' or key == 'pathTransform':
+            elif key == 'pathTransform':
                 self.update_transform(val)
             elif key == 'fastTrigger':
                 self.SetFastExtTrigger(val)
@@ -548,12 +563,13 @@ class Camera(object):
     
         # Recalculate and apply fastest vertical shift speed.
         self.set_fastest_vs_speed()
-
+        
         # Set enabled indicator flag.
         self.enabled = True
 
         if acquiring_on_entry:
             self.StartAcquisition()
+            self.acquiring = True
             self.logger.log('Resuming acquisition after settings updates.')
         
         return self.enabled
@@ -788,6 +804,7 @@ class DataThread(threading.Thread):
         self.run_flag = True
         # Transform operation: fliplr, flipud, rot90
         self.transform = (0, 0, 0)
+        self.transform_lock = threading.Lock()
 
 
     def __del__(self):
@@ -797,8 +814,9 @@ class DataThread(threading.Thread):
 
     def get_transformed_image(self):
         m = self.image_array
-        flips = (self.transform[0], self.transform[1])
-        rotation = self.transform[2]
+        with self.transform_lock:
+            flips = (self.transform[0], self.transform[1])
+            rotation = self.transform[2]
 
         return {(0,0): numpy.rot90(m, rotation),
                 (0,1): numpy.flipud(numpy.rot90(m, rotation)),
@@ -865,7 +883,8 @@ class DataThread(threading.Thread):
     def set_transform(self, transform):
         if (type(transform) is tuple and len(transform) == 3 and 
                 all(t ==0 or t == 1 for t in transform)):
-            self.transform = transform
+            with self.transform_lock:
+                self.transform = transform
         else:
             raise Exception('Bad transform: expected three-element tuple of 1s and 0s.')
 
