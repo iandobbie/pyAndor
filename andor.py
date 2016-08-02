@@ -330,7 +330,7 @@ class Camera(object):
         # Enable temperature control.
         if settings.get('isWaterCooled'):
             # Use fan at low speed.
-            self.SetFanMode(2)
+            self.SetFanMode(1)
         else:
             # Use fan at full speed.
             self.SetFanMode(0)
